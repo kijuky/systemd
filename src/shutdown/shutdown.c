@@ -36,6 +36,7 @@
 #include "log.h"
 #include "luo-util.h"
 #include "main-func.h"
+#include "memory-util.h"
 #include "options.h"
 #include "parse-util.h"
 #include "pidref.h"
@@ -326,10 +327,26 @@ static void init_watchdog(void) {
                 usec_t usec;
 
                 r = safe_atou64(s, &usec);
-                if (r < 0)
+                if (r < 0) {
                         log_warning_errno(r, "Failed to parse watchdog timeout '%s', ignoring: %m", s);
-                else
-                        (void) watchdog_setup(usec);
+                        return;
+                }
+
+                s = secure_getenv("WATCHDOG_FD");
+                if (s && usec > 0) {
+                        int fd = parse_fd(s);
+                        if (fd < 0)
+                                log_warning_errno(fd, "Failed to parse $WATCHDOG_FD, ignoring: %s", s);
+                        else {
+                                r = watchdog_adopt_fd(fd, usec);
+                                if (r >= 0)
+                                        return;
+
+                                log_warning_errno(r, "Failed to adopt watchdog fd %i, opening the device again: %m", fd);
+                        }
+                }
+
+                (void) watchdog_setup(usec);
         }
 }
 
@@ -411,11 +428,24 @@ static int run(int argc, char *argv[]) {
         /* If PID 1 passed us an LUO serialization fd, parse it first so we know which fds to keep open. */
         (void) luo_parse_serialization(&luo_serialization, &luo_fds, &n_luo_fds);
 
+        /* PID 1 may hand over the reboot watchdog while it is still running, see watchdog_pass_fd(). */
+        const char *e = secure_getenv("WATCHDOG_FD");
+        int watchdog_fd = e ? parse_fd(e) : -EBADF;
+
+        _cleanup_free_ int *keep_fds = new(int, n_luo_fds + 1);
+        if (!keep_fds)
+                return log_oom();
+
+        size_t n_keep_fds = n_luo_fds;
+        memcpy_safe(keep_fds, luo_fds, n_luo_fds * sizeof(int));
+        if (watchdog_fd >= 0)
+                keep_fds[n_keep_fds++] = watchdog_fd;
+
         /* Close random fds we might have get passed, just for paranoia, before we open any new fds, for
          * example for logging. After all this tool's purpose is about detaching any pinned resources, and
          * open file descriptors are the primary way to pin resources. Note that we don't really expect any
-         * fds to be passed here, except for LUO fds that need to survive until kexec. */
-        (void) close_all_fds(luo_fds, n_luo_fds);
+         * fds to be passed here, except for LUO fds that need to survive until kexec and the watchdog. */
+        (void) close_all_fds(keep_fds, n_keep_fds);
 
         /* The log target defaults to console, but the original systemd process will pass its log target in through a
          * command line argument, which will override this default. Also, ensure we'll never log to the journal or
@@ -619,11 +649,10 @@ static int run(int argc, char *argv[]) {
         }
 
         /* We're done with the watchdog. Note that the watchdog is explicitly not stopped here. It remains
-         * active to guard against any issues during the rest of the shutdown sequence. Note that we
-         * explicitly close the device with disarm=false here, before releasing the rest of the watchdog
-         * data. */
-        watchdog_close(/* disarm= */ false);
-        watchdog_free_device();
+         * active to guard against any issues during the rest of the shutdown sequence. The device is not
+         * closed either: closing a running watchdog without disarming it makes the kernel log "watchdog
+         * did not stop!". It is O_CLOEXEC, so the shutdown hooks below don't inherit it. Don't call
+         * watchdog_free_device() here, as resetting the device path closes and disarms the watchdog. */
 
         const char *arguments[] = {
                 NULL, /* Filled in by execute_directories(), when needed */

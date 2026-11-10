@@ -14,6 +14,8 @@ int watchdog_setup_pretimeout_governor(const char *governor);
 int watchdog_ping(void);
 void watchdog_report_if_missing(void);
 void watchdog_close(bool disarm);
+int watchdog_pass_fd(void);
+int watchdog_adopt_fd(int fd, usec_t timeout);
 usec_t watchdog_runtime_wait(unsigned divisor);
 
 static inline void watchdog_free_device(void) {

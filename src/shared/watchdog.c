@@ -580,6 +580,50 @@ void watchdog_report_if_missing(void) {
                                  "MESSAGE_ID=" SD_MESSAGE_WATCHDOG_OPEN_FAILED_STR);
 }
 
+int watchdog_pass_fd(void) {
+        int r;
+
+        /* Prepares the open device to be inherited across execve(). Closing a running watchdog without
+         * the magic character makes the kernel log "watchdog did not stop!" at critical level, and the
+         * device can only be opened by one process at a time, so hand over the fd itself. */
+
+        if (watchdog_fd < 0)
+                return -EBADF;
+
+        r = fd_cloexec(watchdog_fd, false);
+        if (r < 0)
+                return r;
+
+        return watchdog_fd;
+}
+
+int watchdog_adopt_fd(int fd, usec_t timeout) {
+        int r;
+
+        assert(fd >= 0);
+        assert(timeout > 0);
+
+        if (watchdog_fd >= 0)
+                return -EBUSY;
+
+        r = fd_cloexec(fd, true);
+        if (r < 0)
+                return r;
+
+        watchdog_fd = fd;
+        watchdog_timeout = timeout;
+        watchdog_last_good_ping = watchdog_last_bad_ping = USEC_INFINITY;
+        watchdog_bad_pings = 0;
+
+        r = watchdog_update_timeout();
+        if (r < 0) {
+                watchdog_close(/* disarm= */ false);
+                return r;
+        }
+
+        return 0;
+}
+
 void watchdog_close(bool disarm) {
 
         /* Once closed, pinging the device becomes a NOP and we request a new

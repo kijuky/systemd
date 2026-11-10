@@ -1822,11 +1822,20 @@ static int become_shutdown(int objective, int retval) {
         (void) watchdog_setup_pretimeout(/* timeout= */ 0);
         (void) watchdog_setup_pretimeout_governor(/* governor= */ NULL);
         r = watchdog_setup(watchdog_timer);
-        watchdog_close(/* disarm= */ r < 0);
+        int watchdog_fd = r >= 0 && watchdog_timer > 0 ? watchdog_pass_fd() : -EBADF;
+        if (watchdog_fd < 0)
+                watchdog_close(/* disarm= */ r < 0);
 
         /* The environment block: */
 
         env_block = strv_copy(environ);
+
+        /* Hand the running watchdog over without closing it, see watchdog_pass_fd() */
+        if (watchdog_fd >= 0) {
+                (void) strv_extendf(&env_block, "WATCHDOG_FD=%i", watchdog_fd);
+                if (watchdog_get_device())
+                        (void) strv_extendf(&env_block, "WATCHDOG_DEVICE=%s", watchdog_get_device());
+        }
 
         /* Tell the binary how often to ping, ignore failure */
         (void) strv_extendf(&env_block, "WATCHDOG_USEC="USEC_FMT, watchdog_timer);
